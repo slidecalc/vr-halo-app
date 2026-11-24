@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <!-- iPhone SE3 などのモバイル端末でズームやスクロールを防止 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>AR 大気光学カメラ - 22°ハロ・虹・環水平/環天頂アーク</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', 'Noto Sans JP', sans-serif;
+            background-color: #000000;
+            color: #ffffff;
+            overscroll-behavior: none;
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+        }
+
+        /* iOS Safariのダイナミックビューポート高さ(100dvh)対応 */
+        .app-viewport {
+            position: fixed;
+            inset: 0;
+            width: 100%;
+            height: 100vh;
+            height: 100dvh;
+            overflow: hidden;
+            background: #000;
+        }
+
+        /* 全画面カメラ映像 */
+        #camera-video {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* AR描画用透明オーバーレイキャンバス */
+        #ar-canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        /* セーフエリア考慮 */
+        .safe-top {
+            padding-top: max(1rem, env(safe-area-inset-top));
+        }
+        .safe-bottom {
+            padding-bottom: max(2rem, env(safe-area-inset-bottom));
+        }
+    </style>
+</head>
+<body>
+
+    <div class="app-viewport">
+        <!-- 最広角ライブカメラ映像 -->
+        <video id="camera-video" playsinline autoplay muted></video>
+
+        <!-- 光学現象リアルタイムAR描画キャンバス -->
+        <canvas id="ar-canvas"></canvas>
+
+        <!-- 中央ターゲットレティクル（光源設定前のみ表示） -->
+        <div id="target-reticle" class="pointer-events-none absolute inset-0 flex items-center justify-center transition-opacity duration-300">
+            <div class="relative flex items-center justify-center w-24 h-24">
+                <!-- 外周の照準リング -->
+                <div class="absolute inset-0 rounded-full border border-white/60 border-dashed animate-[spin_12s_linear_infinite]"></div>
+                <!-- 中央の光源検出エリア目安 -->
+                <div class="w-12 h-12 rounded-full border-2 border-amber-300/90 shadow-[0_0_15px_rgba(252,211,77,0.5)] flex items-center justify-center">
+                    <div class="w-1.5 h-1.5 rounded-full bg-amber-300"></div>
+                </div>
+                <span class="absolute -bottom-7 whitespace-nowrap text-[11px] font-medium text-white/90 bg-black/50 backdrop-blur-sm px-2.5 py-0.5 rounded-full">
+                    明るい光源を中央に合わせる
+                </span>
+            </div>
+        </div>
+
+        <!-- 上部ステータス＆再設定用ミニボタン（光源ロック後のみ控えめに表示） -->
+        <div class="safe-top absolute top-0 inset-x-0 z-20 flex items-center justify-between px-4 pointer-events-none">
+            <div id="status-badge" class="hidden pointer-events-auto flex items-center space-x-2 bg-black/45 backdrop-blur-md border border-white/15 px-3 py-1.5 rounded-full">
+                <span class="w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_8px_#fbbf24]"></span>
+                <span id="status-text" class="text-xs font-medium text-white/95">太陽ロック中</span>
+            </div>
+            <button id="recalibrate-btn" type="button" aria-label="光源を再設定" class="hidden pointer-events-auto ml-auto p-2.5 rounded-full bg-black/45 hover:bg-black/70 active:scale-95 transition backdrop-blur-md border border-white/15 text-white/85">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+            </button>
+        </div>
+
+        <!-- 画面下部「光源設定」ボタン（起動時に表示、押下後に消去） -->
+        <div id="bottom-controls" class="safe-bottom absolute bottom-0 inset-x-0 z-20 flex flex-col items-center justify-end px-6 pointer-events-none">
+            <button id="set-light-btn" type="button" class="pointer-events-auto w-full max-w-xs py-4 px-8 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 active:scale-95 transition-all duration-200 font-bold text-base tracking-wider text-white shadow-[0_8px_30px_rgba(245,158,11,0.5)] border border-white/30 flex items-center justify-center space-x-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                </svg>
+                <span>光源設定</span>
+            </button>
+        </div>
+
+        <!-- エラー・権限案内モーダル（必要時のみ表示） -->
+        <div id="error-overlay" class="hidden fixed inset-0 z-50 flex flex-col items-center justify-center p-6 text-center bg-neutral-950/95 backdrop-blur-md">
+            <div class="w-16 h-16 mb-4 rounded-2xl bg-red-500/20 text-red-400 flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+            </div>
+            <h2 id="error-title" class="text-lg font-bold text-white mb-2">エラーが発生しました</h2>
+            <p id="error-desc" class="text-sm text-neutral-300 leading-relaxed mb-6 max-w-sm">
+                カメラまたはセンサーへのアクセスが許可されていません。
+            </p>
+            <button id="retry-btn" type="button" class="w-full max-w-xs py-3.5 px-6 rounded-xl bg-blue-600 hover:bg-blue-500 active:scale-95 transition font-semibold text-white">
+                再試行する
+            </button>
+        </div>
+
+        <!-- 光源輝度解析用オフスクリーンCanvas -->
+        <canvas id="analysis-canvas" class="hidden"></canvas>
+    </div>
+
+    <script>
+        /**
+         * iPhone SE (第3世代) Safari 最適化 AR大気光学カメラ
+         * - 最広角カメラ映像の取得とリアルタイム投影
+         * - 加速度センサー (devicemotion) + ジャイロ/方位センサー (deviceorientation) による3D姿勢推定
+         * - 光源輝度重心検出による太陽3Dベクトル固定
+         * - 22°ハロ・虹(42°)・環天頂アーク・環水平アークの3D空間リアルタイムAR描画
+         */
+        document.addEventListener('DOMContentLoaded', () => {
+            // DOM要素
+            const videoEl = document.getElementById('camera-video');
+            const arCanvas = document.getElementById('ar-canvas');
+            const arCtx = arCanvas.getContext('2d');
+            const analysisCanvas = document.getElementById('analysis-canvas');
+            const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true });
+
+            const targetReticle = document.getElementById('target-reticle');
+            const bottomControls = document.getElementById('bottom-controls');
+            const setLightBtn = document.getElementById('set-light-btn');
+            const statusBadge = document.getElementById('status-badge');
+            const statusText = document.getElementById('status-text');
+            const recalibrateBtn = document.getElementById('recalibrate-btn');
+
+            const errorOverlay = document.getElementById('error-overlay');
+            const errorTitle = document.getElementById('error-title');
+            const errorDesc = document.getElementById('error-desc');
+            const retryBtn = document.getElementById('retry-btn');
+
+            // 定数・角度変換
+            const DEG2RAD = Math.PI / 180;
+            const RAD2DEG = 180 / Math.PI;
+
+            // iPhone SE3 広角カメラ(28mm換算)の垂直画角 (ポートレート時 約65.5°)
+            const CAMERA_VERTICAL_FOV_DEG = 65.5;
+
+            // アプリケーション状態
+            let currentStream = null;
+            let sensorsActive = false;
+            let isSunLocked = false;
+
+            // センサー状態（World座標系: X=東/右, Y=北/奥, Z=天頂/上）
+            let latestOrientation = { alpha: 0, beta: 90, gamma: 0, hasData: false };
+            // 加速度センサーから得た重力ベクトル（端末座標系での下向き方向、ローパスフィルタ済み）
+            let smoothedGravity = { x: 0, y: -9.8, z: 0, hasData: false };
+
+            // ロックされた太陽の3D単位ベクトル（World座標系）
+            let sunWorldVec = null;
+
+            /**
+             * 3Dベクトル演算ユーティリティ
+             */
+            const Vec3 = {
+                create: (x, y, z) => ({ x, y, z }),
+                add: (a, b) => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z }),
+                sub: (a, b) => ({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }),
+                scale: (v, s) => ({ x: v.x * s, y: v.y * s, z: v.z * s }),
+                dot: (a, b) => a.x * b.x + a.y * b.y + a.z * b.z,
+                cross: (a, b) => ({
+                    x: a.y * b.z - a.z * b.y,
+                    y: a.z * b.x - a.x * b.z,
+                    z: a.x * b.y - a.y * b.x
+                }),
+                length: (v) => Math.hypot(v.x, v.y, v.z),
+                normalize: (v) => {
+                    const len = Math.hypot(v.x, v.y, v.z);
+                    return len > 1e-8 ? { x: v.x / len, y: v.y / len, z: v.z / len } : { x: 0, y: 0, z: 1 };
+                }
+            };
+
+            /**
+             * エラーオーバーレイ表示
+             */
+            function showError(title, desc, canRetry = true) {
+                errorTitle.textContent = title;
+                errorDesc.textContent = desc;
+                retryBtn.style.display = canRetry ? 'inline-block' : 'none';
+                errorOverlay.classList.remove('hidden');
+            }
+
+            /**
+             * キャンバスのリサイズ処理（Retinaディスプレイ対応）
+             */
+            function resizeCanvas() {
+                const dpr = Math.min(window.devicePixelRatio || 1, 2);
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+                arCanvas.width = Math.round(width * dpr);
+                arCanvas.height = Math.round(height * dpr);
+                arCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            }
+            window.addEventListener('resize', resizeCanvas);
+            resizeCanvas();
+
+            /**
+             * 1. iPhone SE3 最広角リアカメラの起動
+             */
+            async function initCamera() {
+                const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+                if (!window.isSecureContext && !isLocalhost) {
+                    showError(
+                        'HTTPS接続が必要です',
+                        'iPhoneのSafariでカメラとモーションセンサーを使用するには、https:// から始まるURLでアクセスしてください。',
+                        false
+                    );
+                    return;
+                }
+
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    showError(
+                        'カメラが利用できません',
+                        'Safariブラウザで直接このページを開いているか確認してください。',
+                        false
+                    );
+                    return;
+                }
+
+                if (currentStream) {
+                    currentStream.getTracks().forEach(t => t.stop());
+                }
+
+                // 最広角（zoom: 1.0、最大画角センサー取得のため高解像度4:3または16:9のネイティブ比率を要求）
+                const constraints = {
+                    audio: false,
+                    video: {
+                        facingMode: { ideal: 'environment' },
+                        width: { ideal: 1920 },
+                        height: { ideal: 1440 },
+                        zoom: { ideal: 1.0 }
+                    }
+                };
+
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    currentStream = stream;
+
+                    // トラックがzoom機能を持つ場合、最小ズーム（最広角）を明示的に適用
+                    const videoTrack = stream.getVideoTracks()[0];
+                    if (videoTrack && typeof videoTrack.getCapabilities === 'function') {
+                        const caps = videoTrack.getCapabilities();
+                        if (caps.zoom && typeof caps.zoom.min === 'number') {
+                            try {
+                                await videoTrack.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+                            } catch (e) {
+                                // zoom制約非対応時は無視して継続
+                            }
+                        }
+                    }
+
+                    videoEl.srcObject = stream;
+                    await videoEl.play();
+                    errorOverlay.classList.add('hidden');
+                } catch (err) {
+                    console.error('Camera Error:', err);
+                    if (err.name === 'NotAllowedError') {
+                        showError(
+                            'カメラの許可が必要です',
+                            'Safariのアドレスバー左側の設定から「カメラ」を許可して再試行してください。',
+                            true
+                        );
+                    } else {
+                        showError(
+                            'カメラの起動に失敗しました',
+                            '他のアプリがカメラを使用していないか確認し、再試行してください。',
+                            true
+                        );
+                    }
+                }
+            }
+
+            /**
+             * 2. モーション・方位センサーの権限要求とリスナー登録（iOS 13+ Safari対応）
+             */
+            async function requestAndStartSensors() {
+                if (sensorsActive) return true;
+
+                try {
+                    // iOS Safari 向け DeviceMotionEvent 権限リクエスト
+                    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                        const motionPerm = await DeviceMotionEvent.requestPermission();
+                        if (motionPerm !== 'granted') {
+                            showError(
+                                'モーションセンサーの許可が必要です',
+                                'iPhoneの傾きを検出するため、「動作と方向」へのアクセスを許可してください。',
+                                true
+                            );
+                            return false;
+                        }
+                    }
+
+                    // iOS Safari 向け DeviceOrientationEvent 権限リクエスト
+                    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                        const orientPerm = await DeviceOrientationEvent.requestPermission();
+                        if (orientPerm !== 'granted') {
+                            showError(
+                                '方向センサーの許可が必要です',
+                                'iPhoneの向きを追跡するため、「動作と方向」へのアクセスを許可してください。',
+                                true
+                            );
+                            return false;
+                        }
+                    }
+
+                    // 加速度センサー（重力ベクトル取得）
+                    window.addEventListener('devicemotion', (e) => {
+                        const accG = e.accelerationIncludingGravity;
+                        if (accG && accG.x !== null && accG.y !== null && accG.z !== null) {
+                            // ローパスフィルタで手ブレによる重力ベクトルの高周波ノイズを平滑化
+                            const alphaFilter = 0.25;
+                            if (!smoothedGravity.hasData) {
+                                smoothedGravity.x = accG.x;
+                                smoothedGravity.y = accG.y;
+                                smoothedGravity.z = accG.z;
+                                smoothedGravity.hasData = true;
+                            } else {
+                                smoothedGravity.x += alphaFilter * (accG.x - smoothedGravity.x);
+                                smoothedGravity.y += alphaFilter * (accG.y - smoothedGravity.y);
+                                smoothedGravity.z += alphaFilter * (accG.z - smoothedGravity.z);
+                            }
+                        }
+                    }, true);
+
+                    // 端末3D姿勢角（alpha: 方位角, beta: 前後傾き, gamma: 左右傾き）
+                    window.addEventListener('deviceorientation', (e) => {
+                        if (e.alpha !== null && e.beta !== null && e.gamma !== null) {
+                            latestOrientation.alpha = e.alpha;
+                            latestOrientation.beta = e.beta;
+                            latestOrientation.gamma = e.gamma;
+                            latestOrientation.hasData = true;
+                        }
+                    }, true);
+
+                    sensorsActive = true;
+                    return true;
+                } catch (err) {
+                    console.error('Sensor permission error:', err);
+                    showError(
+                        'センサーの起動に失敗しました',
+                        'Safariの設定で「モーションと画面の向きのアクセス」が有効になっているか確認してください。',
+                        true
+                    );
+                    return false;
+                }
+            }
+
+            /**
+             * 3. 現在のiPhoneの3D姿勢からカメラ基底ベクトル（Right, Up, Forward）を計算
+             * World座標系: X=東, Y=北, Z=天頂(真上)
+             * Device座標系 (iOS portrait): X_d=右, Y_d=上, Z_d=画面手前(ユーザー側)
+             * 背面カメラ視線方向 Forward = -Z_d, カメラ上方向 Up = Y_d, カメラ右方向 Right = X_d
+             */
+            function getCameraBasisVectors() {
+                const alpha = latestOrientation.alpha * DEG2RAD;
+                const beta = latestOrientation.beta * DEG2RAD;
+                const gamma = latestOrientation.gamma * DEG2RAD;
+
+                // W3C DeviceOrientation Z-X'-Y'' オイラー回転行列 (Device -> World)
+                const cA = Math.cos(alpha), sA = Math.sin(alpha);
+                const cB = Math.cos(beta),  sB = Math.sin(beta);
+                const cG = Math.cos(gamma), sG = Math.sin(gamma);
+
+                // Device X軸 (画面右) の World座標
+                let right = Vec3.create(
+                    cA * cG - sA * sB * sG,
+                    sA * cG + cA * sB * sG,
+                    -cB * sG
+                );
+
+                // Device Y軸 (画面上) の World座標
+                let up = Vec3.create(
+                    -sA * cB,
+                    cA * cB,
+                    sB
+                );
+
+                // Device -Z軸 (背面カメラの視線前方) の World座標
+                // Device +Z = (cA*sG + sA*sB*cG, sA*sG - cA*sB*cG, cB*cG) なので反転
+                let forward = Vec3.create(
+                    -(cA * sG + sA * sB * cG),
+                    -(sA * sG - cA * sB * cG),
+                    -(cB * cG)
+                );
+
+                // 加速度センサー(重力ベクトル)が有効な場合、天頂方向(Z軸)を重力と整合させて高精度化
+                if (smoothedGravity.hasData) {
+                    // iOSのaccelerationIncludingGravityは「端末を上に支える力(=天頂方向)」を指す
+                    // Device座標系での天頂単位ベクトル gUpDevice
+                    const gLen = Math.hypot(smoothedGravity.x, smoothedGravity.y, smoothedGravity.z);
+                    if (gLen > 1.0) {
+                        const ux = smoothedGravity.x / gLen;
+                        const uy = smoothedGravity.y / gLen;
+                        const uz = smoothedGravity.z / gLen;
+
+                        // Device座標系での天頂ベクトルを現在のオイラー角から得た基底で検証し、
+                        // 傾き(pitch/roll)のドリフトを重力ベクトルで安定化させる
+                        const zenithFromAccel = Vec3.normalize(
+                            Vec3.add(
+                                Vec3.add(Vec3.scale(right, ux), Vec3.scale(up, uy)),
+                                Vec3.scale(forward, -uz)
+                            )
+                        );
+                        // World天頂(0,0,1)との微小な傾きズレを補正
+                        const worldZ = Vec3.create(0, 0, 1);
+                        const corrAxis = Vec3.cross(zenithFromAccel, worldZ);
+                        const corrSin = Vec3.length(corrAxis);
+                        if (corrSin > 1e-5 && corrSin < 0.5) {
+                            // ロドリゲスの回転公式で基底ベクトルを天頂基準に微調整
+                            const k = Vec3.normalize(corrAxis);
+                            const cosT = Vec3.dot(zenithFromAccel, worldZ);
+                            const rotateVec = (v) => Vec3.add(
+                                Vec3.add(Vec3.scale(v, cosT), Vec3.scale(Vec3.cross(k, v), corrSin)),
+                                Vec3.scale(k, Vec3.dot(k, v) * (1 - cosT))
+                            );
+                            right = Vec3.normalize(rotateVec(right));
+                            up = Vec3.normalize(rotateVec(up));
+                            forward = Vec3.normalize(rotateVec(forward));
+                        }
+                    }
+                }
+
+                // 画面回転（横向き等）への対応
+                const screenAngle = (window.screen.orientation && window.screen.orientation.angle) || window.orientation || 0;
+                if (screenAngle === 90) {
+                    const tmp = right;
+                    right = Vec3.scale(up, -1);
+                    up = tmp;
+                } else if (screenAngle === -90 || screenAngle === 270) {
+                    const tmp = right;
+                    right = up;
+                    up = Vec3.scale(tmp, -1);
+                }
+
+                return { right, up, forward };
+            }
+
+            /**
+             * 画面サイズとvideoのobject-fit: coverに一致する焦点距離(ピクセル)を取得
+             */
+            function getCameraFocalLengthPx() {
+                const screenW = window.innerWidth;
+                const screenH = window.innerHeight;
+                const vFovRad = CAMERA_VERTICAL_FOV_DEG * DEG2RAD;
+
+                // ポートレート基準の垂直FOVから焦点距離を計算
+                // videoがobject-fit: coverで表示される際のスケーリングを考慮
+                const vidW = videoEl.videoWidth || 1080;
+                const vidH = videoEl.videoHeight || 1920;
+                const vidAspect = vidW / vidH;
+                const screenAspect = screenW / screenH;
+
+                let effectiveVFovRad = vFovRad;
+                if (screenAspect > vidAspect) {
+                    // 横幅に合わせて上下がトリミングされる場合
+                    const scale = vidAspect / screenAspect;
+                    effectiveVFovRad = 2 * Math.atan(Math.tan(vFovRad / 2) * scale);
+                }
+
+                return (screenH / 2) / Math.tan(effectiveVFovRad / 2);
+            }
+
+            /**
+             * 4. 画面中央付近の最も明るい1個の光源を検出し、太陽の3Dベクトルを記憶
+             */
+            function detectAndLockSunVector() {
+                const screenW = window.innerWidth;
+                const screenH = window.innerHeight;
+                const cx = screenW / 2;
+                const cy = screenH / 2;
+
+                // デフォルトは画面ど真ん中（光源が検出できない暗い場所でも確実に動作させる）
+                let offsetX = 0;
+                let offsetY = 0;
+
+                if (videoEl.readyState >= 2 && videoEl.videoWidth > 0) {
+                    const sampleSize = 160; // 解析用キャンバスサイズ
+                    analysisCanvas.width = sampleSize;
+                    analysisCanvas.height = sampleSize;
+
+                    const vidW = videoEl.videoWidth;
+                    const vidH = videoEl.videoHeight;
+                    const screenAspect = screenW / screenH;
+                    const vidAspect = vidW / vidH;
+
+                    // object-fit: cover で実際に画面に表示されている領域を算出
+                    let drawW = vidW, drawH = vidH, sx = 0, sy = 0;
+                    if (screenAspect > vidAspect) {
+                        drawH = vidW / screenAspect;
+                        sy = (vidH - drawH) / 2;
+                    } else {
+                        drawW = vidH * screenAspect;
+                        sx = (vidW - drawW) / 2;
+                    }
+
+                    // 画面中央 24% の領域を切り出して輝度重心を解析
+                    const cropRatio = 0.24;
+                    const cropW = drawW * cropRatio;
+                    const cropH = drawH * cropRatio;
+                    const cropX = sx + (drawW - cropW) / 2;
+                    const cropY = sy + (drawH - cropH) / 2;
+
+                    analysisCtx.drawImage(videoEl, cropX, cropY, cropW, cropH, 0, 0, sampleSize, sampleSize);
+                    const imgData = analysisCtx.getImageData(0, 0, sampleSize, sampleSize).data;
+
+                    // まず最大輝度を探索
+                    let maxLum = 0;
+                    for (let i = 0; i < imgData.length; i += 4) {
+                        const lum = 0.299 * imgData[i] + 0.587 * imgData[i + 1] + 0.114 * imgData[i + 2];
+                        if (lum > maxLum) maxLum = lum;
+                    }
+
+                    // 最大輝度の90%以上の高輝度ピクセルの重心を計算（明るい1個の光源の中心を特定）
+                    const threshold = Math.max(140, maxLum * 0.90);
+                    let sumX = 0, sumY = 0, sumWeight = 0;
+
+                    for (let y = 0; y < sampleSize; y++) {
+                        for (let x = 0; x < sampleSize; x++) {
+                            const idx = (y * sampleSize + x) * 4;
+                            const lum = 0.299 * imgData[idx] + 0.587 * imgData[idx + 1] + 0.114 * imgData[idx + 2];
+                            if (lum >= threshold) {
+                                const weight = (lum - threshold + 1) ** 2;
+                                sumX += x * weight;
+                                sumY += y * weight;
+                                sumWeight += weight;
+                            }
+                        }
+                    }
+
+                    if (sumWeight > 0) {
+                        const normX = (sumX / sumWeight) / sampleSize - 0.5; // -0.5 〜 +0.5
+                        const normY = (sumY / sumWeight) / sampleSize - 0.5; // -0.5 〜 +0.5
+                        offsetX = normX * (screenW * cropRatio);
+                        offsetY = normY * (screenH * cropRatio);
+                    }
+                }
+
+                // 2D画面上の光源位置 (cx + offsetX, cy + offsetY) をカメラ空間3D方向ベクトルへ逆投影
+                const f = getCameraFocalLengthPx();
+                const camDir = Vec3.normalize(Vec3.create(offsetX / f, -offsetY / f, 1.0));
+
+                // 現在のカメラ基底ベクトルを使って World座標系の太陽方向ベクトルに変換し記憶
+                const { right, up, forward } = getCameraBasisVectors();
+                sunWorldVec = Vec3.normalize(
+                    Vec3.add(
+                        Vec3.add(Vec3.scale(right, camDir.x), Vec3.scale(up, camDir.y)),
+                        Vec3.scale(forward, camDir.z)
+                    )
+                );
+
+                isSunLocked = true;
+            }
+
+            /**
+             * 3D World単位ベクトルを 2D Canvas座標 (x, y) へ透視投影
+             * カメラ後方にある場合は null を返す
+             */
+            function projectWorldToScreen(worldVec, basis, f, cx, cy) {
+                const xc = Vec3.dot(worldVec, basis.right);
+                const yc = Vec3.dot(worldVec, basis.up);
+                const zc = Vec3.dot(worldVec, basis.forward);
+
+                // カメラの正面（zc > 0.05）にある点のみ投影
+                if (zc <= 0.05) return null;
+
+                const u = cx + f * (xc / zc);
+                const v = cy - f * (yc / zc);
+                return { x: u, y: v, zc };
+            }
+
+            /**
+             * 指定中心軸 axisVec から角度 radiusRad だけ離れた3D空間上の円周（または円弧）を描画
+             */
+            function drawSphericalArc(axisVec, radiusRad, azStart, azEnd, segments, strokeStyle, lineWidth, basis, f, cx, cy) {
+                // axisVec に直交する2つの基底ベクトル (uAxis, vAxis) を構築
+                const ref = Math.abs(axisVec.z) < 0.9 ? Vec3.create(0, 0, 1) : Vec3.create(1, 0, 0);
+                const uAxis = Vec3.normalize(Vec3.cross(ref, axisVec));
+                const vAxis = Vec3.cross(axisVec, uAxis);
+
+                const cosR = Math.cos(radiusRad);
+                const sinR = Math.sin(radiusRad);
+
+                arCtx.beginPath();
+                arCtx.strokeStyle = strokeStyle;
+                arCtx.lineWidth = lineWidth;
+                arCtx.lineCap = 'round';
+                arCtx.lineJoin = 'round';
+
+                let isPenDown = false;
+                const margin = Math.max(cx, cy) * 2.5; // 画面外クリッピング境界
+
+                for (let i = 0; i <= segments; i++) {
+                    const t = i / segments;
+                    const phi = azStart + (azEnd - azStart) * t;
+                    const cosP = Math.cos(phi);
+                    const sinP = Math.sin(phi);
+
+                    // 3D空間上の円周点 P = cos(R)*axis + sin(R)*(cos(phi)*u + sin(phi)*v)
+                    const pWorld = Vec3.add(
+                        Vec3.scale(axisVec, cosR),
+                        Vec3.scale(
+                            Vec3.add(Vec3.scale(uAxis, cosP), Vec3.scale(vAxis, sinP)),
+                            sinR
+                        )
+                    );
+
+                    const pt = projectWorldToScreen(pWorld, basis, f, cx, cy);
+                    if (pt && Math.abs(pt.x - cx) < margin && Math.abs(pt.y - cy) < margin) {
+                        if (!isPenDown) {
+                            arCtx.moveTo(pt.x, pt.y);
+                            isPenDown = true;
+                        } else {
+                            arCtx.lineTo(pt.x, pt.y);
+                        }
+                    } else {
+                        isPenDown = false;
+                    }
+                }
+                arCtx.stroke();
+            }
+
+            /**
+             * 水平圏（天頂 Z を中心とした高度角 altRad の円弧）を描画（環天頂アーク・環水平アーク用）
+             */
+            function drawHorizontalArc(sunAzimuthRad, altRad, halfSpanRad, segments, strokeStyle, lineWidth, basis, f, cx, cy) {
+                const cosAlt = Math.cos(altRad);
+                const sinAlt = Math.sin(altRad);
+
+                arCtx.beginPath();
+                arCtx.strokeStyle = strokeStyle;
+                arCtx.lineWidth = lineWidth;
+                arCtx.lineCap = 'round';
+                arCtx.lineJoin = 'round';
+
+                let isPenDown = false;
+                const margin = Math.max(cx, cy) * 2.5;
+
+                for (let i = 0; i <= segments; i++) {
+                    const t = i / segments;
+                    const az = (sunAzimuthRad - halfSpanRad) + (2 * halfSpanRad) * t;
+                    // World座標系 (X=cos(az)*cos(alt), Y=sin(az)*cos(alt), Z=sin(alt))
+                    const pWorld = Vec3.create(
+                        Math.cos(az) * cosAlt,
+                        Math.sin(az) * cosAlt,
+                        sinAlt
+                    );
+
+                    const pt = projectWorldToScreen(pWorld, basis, f, cx, cy);
+                    if (pt && Math.abs(pt.x - cx) < margin && Math.abs(pt.y - cy) < margin) {
+                        if (!isPenDown) {
+                            arCtx.moveTo(pt.x, pt.y);
+                            isPenDown = true;
+                        } else {
+                            arCtx.lineTo(pt.x, pt.y);
+                        }
+                    } else {
+                        isPenDown = false;
+                    }
+                }
+                arCtx.stroke();
+            }
+
+            /**
+             * 七色のスペクトル定義（光学現象の屈折角順に配列化）
+             */
+            const RAINBOW_BANDS = [
+                { color: 'rgba(255, 45, 45, 0.52)',   offsetDeg: 0.90 }, // 赤 (屈折角が最も小さい＝太陽側)
+                { color: 'rgba(255, 145, 20, 0.50)',  offsetDeg: 0.60 }, // 橙
+                { color: 'rgba(255, 235, 30, 0.50)',  offsetDeg: 0.30 }, // 黄
+                { color: 'rgba(50, 230, 80, 0.48)',   offsetDeg: 0.00 }, // 緑
+                { color: 'rgba(30, 210, 255, 0.48)',  offsetDeg: -0.30 }, // 水色
+                { color: 'rgba(55, 100, 255, 0.48)',  offsetDeg: -0.60 }, // 青
+                { color: 'rgba(165, 65, 255, 0.46)',  offsetDeg: -0.90 }  // 紫 (屈折角が最も大きい＝太陽と反対側)
+            ];
+
+            /**
+             * 5. 毎フレームのAR描画ループ
+             */
+            function renderLoop() {
+                const screenW = window.innerWidth;
+                const screenH = window.innerHeight;
+                const cx = screenW / 2;
+                const cy = screenH / 2;
+
+                arCtx.clearRect(0, 0, screenW, screenH);
+
+                if (isSunLocked && sunWorldVec) {
+                    const basis = getCameraBasisVectors();
+                    const f = getCameraFocalLengthPx();
+                    // 1度あたりのピクセル幅（リングの太さを画角に連動させる）
+                    const pxPerDeg = f * DEG2RAD;
+
+                    // 加算スクリーン合成で光らしい自然な透け感を表現
+                    arCtx.save();
+                    arCtx.globalCompositeOperation = 'screen';
+
+                    // 太陽位置の小さな光点マーカー（太陽そのものの位置確認用）
+                    const sunScreen = projectWorldToScreen(sunWorldVec, basis, f, cx, cy);
+                    if (sunScreen) {
+                        const grad = arCtx.createRadialGradient(sunScreen.x, sunScreen.y, 1, sunScreen.x, sunScreen.y, 18);
+                        grad.addColorStop(0, 'rgba(255, 250, 220, 0.9)');
+                        grad.addColorStop(0.5, 'rgba(255, 210, 100, 0.35)');
+                        grad.addColorStop(1, 'rgba(255, 210, 100, 0)');
+                        arCtx.fillStyle = grad;
+                        arCtx.beginPath();
+                        arCtx.arc(sunScreen.x, sunScreen.y, 18, 0, Math.PI * 2);
+                        arCtx.fill();
+                    }
+
+                    // ---------------------------------------------------------
+                    // [1] 22°ハロ（内暈）：太陽から22°の白いリング
+                    // ---------------------------------------------------------
+                    // 外側の柔らかい光の拡散グロー
+                    drawSphericalArc(
+                        sunWorldVec,
+                        22.1 * DEG2RAD,
+                        0, Math.PI * 2,
+                        144,
+                        'rgba(255, 255, 255, 0.22)',
+                        Math.max(6, pxPerDeg * 1.4),
+                        basis, f, cx, cy
+                    );
+                    // メインの22°白いリング（内縁がややシャープに輝く特性を再現）
+                    drawSphericalArc(
+                        sunWorldVec,
+                        22.0 * DEG2RAD,
+                        0, Math.PI * 2,
+                        144,
+                        'rgba(255, 253, 248, 0.65)',
+                        Math.max(2.5, pxPerDeg * 0.45),
+                        basis, f, cx, cy
+                    );
+
+                    // ---------------------------------------------------------
+                    // [2] 虹（主虹）：対日点(-Sun)から42°（太陽から138°）の七色リング
+                    // ---------------------------------------------------------
+                    const antiSolarVec = Vec3.scale(sunWorldVec, -1);
+                    const rainbowBandWidth = Math.max(2.2, pxPerDeg * 0.36);
+
+                    RAINBOW_BANDS.forEach((band) => {
+                        // 赤が外側(42.0°)、紫が内側(40.2°)になるよう配置
+                        const radiusDeg = 41.1 + band.offsetDeg;
+                        drawSphericalArc(
+                            antiSolarVec,
+                            radiusDeg * DEG2RAD,
+                            0, Math.PI * 2,
+                            180,
+                            band.color,
+                            rainbowBandWidth,
+                            basis, f, cx, cy
+                        );
+                    });
+
+                    // 太陽の高度角 h_s と方位角 sunAzimuth を算出
+                    const sunElevRad = Math.asin(Math.max(-1, Math.min(1, sunWorldVec.z)));
+                    const sunAzimuthRad = Math.atan2(sunWorldVec.y, sunWorldVec.x);
+                    const arcBandWidth = Math.max(2.6, pxPerDeg * 0.42);
+                    const halfSpan = 52 * DEG2RAD; // 太陽方位を中心に左右52°ずつ広がるアーク
+
+                    // ---------------------------------------------------------
+                    // [3] 環天頂アーク（Circumzenithal Arc）：天頂を取り巻く逆さ虹の七色アーク
+                    // ---------------------------------------------------------
+                    // 物理光学式: sin(alt_CZA) = sqrt(n^2 - cos^2(h_s)) (氷の屈折率 n=1.31)
+                    // 室内テストで光源を高く設定した場合でも観察できるよう高度角を安全な範囲(55°〜84°)にクランプ
+                    const nIce = 1.31;
+                    const cosHs = Math.cos(sunElevRad);
+                    const disc = Math.max(0, nIce * nIce - cosHs * cosHs);
+                    let czaBaseAltRad = Math.asin(Math.min(1, Math.sqrt(disc)));
+                    if (isNaN(czaBaseAltRad) || czaBaseAltRad < 55 * DEG2RAD) {
+                        czaBaseAltRad = Math.min(84 * DEG2RAD, Math.max(58 * DEG2RAD, sunElevRad + 46 * DEG2RAD));
+                    }
+                    czaBaseAltRad = Math.min(84 * DEG2RAD, Math.max(55 * DEG2RAD, czaBaseAltRad));
+
+                    RAINBOW_BANDS.forEach((band) => {
+                        // 環天頂アークは下側（太陽側）が赤、上側（天頂側）が紫
+                        const altRad = czaBaseAltRad - band.offsetDeg * DEG2RAD;
+                        drawHorizontalArc(
+                            sunAzimuthRad,
+                            altRad,
+                            halfSpan,
+                            96,
+                            band.color,
+                            arcBandWidth,
+                            basis, f, cx, cy
+                        );
+                    });
+
+                    // ---------------------------------------------------------
+                    // [4] 環水平アーク（Circumhorizontal Arc）：地平線に平行な七色の炎のようなアーク
+                    // ---------------------------------------------------------
+                    // 物理的には太陽高度58°以上で出現（太陽の約46°下方）。
+                    // どの高さの光源テストでも見えるよう、太陽の46°下方を基準に視認しやすい高度(-42°〜+28°)へマッピング
+                    let chaBaseAltRad = sunElevRad - 46 * DEG2RAD;
+                    chaBaseAltRad = Math.max(-42 * DEG2RAD, Math.min(28 * DEG2RAD, chaBaseAltRad));
+
+                    RAINBOW_BANDS.forEach((band) => {
+                        // 環水平アークは上側（太陽側）が赤、下側（地平線側）が紫
+                        const altRad = chaBaseAltRad + band.offsetDeg * DEG2RAD;
+                        drawHorizontalArc(
+                            sunAzimuthRad,
+                            altRad,
+                            halfSpan,
+                            96,
+                            band.color,
+                            arcBandWidth,
+                            basis, f, cx, cy
+                        );
+                    });
+
+                    arCtx.restore();
+                }
+
+                requestAnimationFrame(renderLoop);
+            }
+
+            /**
+             * 「光源設定」ボタン押下時の処理
+             */
+            setLightBtn.addEventListener('click', async () => {
+                setLightBtn.disabled = true;
+
+                // 1. 加速度・姿勢センサーの権限取得と起動（iOS Safari対応）
+                const ok = await requestAndStartSensors();
+                if (!ok) {
+                    setLightBtn.disabled = false;
+                    return;
+                }
+
+                // センサー初回の値が届くまでごく短時間待機（最大120ms）
+                if (!latestOrientation.hasData) {
+                    await new Promise(resolve => setTimeout(resolve, 120));
+                }
+
+                // 2. 画面中央付近の明るい1個の光源を検出し、3D座標ベクトルを記憶
+                detectAndLockSunVector();
+
+                // 3. 「光源設定」ボタンと照準レティクルを消す
+                bottomControls.classList.add('hidden');
+                targetReticle.classList.add('hidden');
+
+                // 上部の小さなステータスと再設定アイコンを表示
+                statusBadge.classList.remove('hidden');
+                recalibrateBtn.classList.remove('hidden');
+            });
+
+            /**
+             * 再設定ボタン（右上の小さなアイコン）押下時のリセット処理
+             */
+            recalibrateBtn.addEventListener('click', () => {
+                isSunLocked = false;
+                sunWorldVec = null;
+                setLightBtn.disabled = false;
+                bottomControls.classList.remove('hidden');
+                targetReticle.classList.remove('hidden');
+                statusBadge.classList.add('hidden');
+                recalibrateBtn.classList.add('hidden');
+            });
+
+            // エラー時の再試行ボタン
+            retryBtn.addEventListener('click', () => {
+                errorOverlay.classList.add('hidden');
+                initCamera();
+            });
+
+            // バックグラウンド移行・復帰時のカメラ再接続
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden && (!currentStream || currentStream.getTracks().every(t => t.readyState === 'ended'))) {
+                    initCamera();
+                }
+            });
+
+            // 起動時に即座に最広角カメラとAR描画ループを開始
+            initCamera();
+            requestAnimationFrame(renderLoop);
+        });
+    </script>
+</body>
+</html>
