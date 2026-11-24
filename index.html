@@ -375,4 +375,216 @@
       const vFovRad = (V_FOV_DEG * Math.PI) / 180;
       const f = (h / 2) / Math.tan(vFovRad / 2);
       const dx = (cx - w / 2) / f;
-      const dy = -(cy - h /
+      const dy = -(cy - h / 2) / f;
+      return norm({ x: dx, y: dy, z: -1 });
+    }
+
+    setLightBtn.addEventListener("click", () => {
+      const rayDevice = detectBrightestLightRay();
+      const m = getDeviceToWorldMatrix(smoothAlpha, smoothBeta, smoothGamma);
+      let sun = norm(deviceToWorld(rayDevice, m));
+
+      const gravLen = Math.hypot(smoothGrav.x, smoothGrav.y, smoothGrav.z);
+      if (gravLen > 1.0) {
+        const upDevice = norm({ x: -smoothGrav.x, y: -smoothGrav.y, z: -smoothGrav.z });
+        const sinAlt = Math.max(-1, Math.min(1, dot(rayDevice, upDevice)));
+        const horiz = norm({ x: sun.x, y: sun.y, z: 0 });
+        const cosAlt = Math.sqrt(Math.max(0, 1 - sinAlt * sinAlt));
+        sun = norm({
+          x: horiz.x * cosAlt,
+          y: horiz.y * cosAlt,
+          z: sinAlt
+        });
+      }
+
+      sunWorld = sun;
+      isLocked = true;
+      setLightBtn.style.display = "none";
+      reticle.style.display = "none";
+      resetBtn.style.display = "block";
+    });
+
+    resetBtn.addEventListener("click", () => {
+      isLocked = false;
+      sunWorld = null;
+      setLightBtn.style.display = "block";
+      reticle.style.display = "block";
+      resetBtn.style.display = "none";
+    });
+
+    function projectWorldToScreen(dirWorld, m, sw, sh) {
+      const d = worldToDevice(dirWorld, m);
+      if (d.z >= -0.15) return null;
+
+      const vFovRad = (V_FOV_DEG * Math.PI) / 180;
+      const f = (sh / 2) / Math.tan(vFovRad / 2);
+      const sx = sw / 2 + (d.x / -d.z) * f;
+      const sy = sh / 2 - (d.y / -d.z) * f;
+
+      if (Math.abs(sx - sw / 2) > sw * 3 || Math.abs(sy - sh / 2) > sh * 3) return null;
+      return { x: sx, y: sy };
+    }
+
+    function drawSphericalArc(centerDir, radiusDeg, startAzDeg, endAzDeg, steps, color, lineWidth, m, sw, sh) {
+      const rRad = (radiusDeg * Math.PI) / 180;
+      const sinR = Math.sin(rRad);
+      const cosR = Math.cos(rRad);
+
+      const ref = Math.abs(centerDir.z) < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 };
+      const u = norm(cross(ref, centerDir));
+      const v = norm(cross(centerDir, u));
+
+      ctx.beginPath();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
+      ctx.lineCap = "round";
+
+      let penDown = false;
+      let prevPt = null;
+
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const az = ((startAzDeg + (endAzDeg - startAzDeg) * t) * Math.PI) / 180;
+        const pWorld = norm(
+          add(
+            scale(centerDir, cosR),
+            add(scale(u, sinR * Math.cos(az)), scale(v, sinR * Math.sin(az)))
+          )
+        );
+
+        const pt = projectWorldToScreen(pWorld, m, sw, sh);
+        if (!pt) {
+          penDown = false;
+          prevPt = null;
+          continue;
+        }
+
+        if (prevPt && Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y) > sw * 0.4) {
+          penDown = false;
+        }
+
+        if (!penDown) {
+          ctx.moveTo(pt.x, pt.y);
+          penDown = true;
+        } else {
+          ctx.lineTo(pt.x, pt.y);
+        }
+        prevPt = pt;
+      }
+      ctx.stroke();
+    }
+
+    const RAINBOW_COLORS = [
+      "rgba(255, 50, 50, 0.72)",
+      "rgba(255, 150, 30, 0.72)",
+      "rgba(255, 235, 50, 0.72)",
+      "rgba(60, 220, 90, 0.72)",
+      "rgba(50, 190, 255, 0.72)",
+      "rgba(60, 90, 255, 0.72)",
+      "rgba(170, 70, 255, 0.72)"
+    ];
+
+    function drawRainbowBand(centerDir, baseRadiusDeg, stepDeg, startAz, endAz, steps, width, m, sw, sh) {
+      for (let i = 0; i < RAINBOW_COLORS.length; i++) {
+        const r = baseRadiusDeg + (i - 3) * stepDeg;
+        drawSphericalArc(centerDir, r, startAz, endAz, steps, RAINBOW_COLORS[i], width, m, sw, sh);
+      }
+    }
+
+    function drawZenithOrientedArc(poleDir, sunAzRad, baseRadiusDeg, spanStartDeg, spanEndDeg, stepDeg, redOutside, m, sw, sh) {
+      const u = norm({ x: Math.cos(sunAzRad), y: Math.sin(sunAzRad), z: 0 });
+      const v = norm(cross(poleDir, u));
+
+      for (let c = 0; c < RAINBOW_COLORS.length; c++) {
+        const offset = redOutside ? (3 - c) * stepDeg : (c - 3) * stepDeg;
+        const rRad = ((baseRadiusDeg + offset) * Math.PI) / 180;
+        const sinR = Math.sin(rRad);
+        const cosR = Math.cos(rRad);
+
+        ctx.beginPath();
+        ctx.strokeStyle = RAINBOW_COLORS[c];
+        ctx.lineWidth = 2.6;
+        ctx.lineCap = "round";
+
+        let penDown = false;
+        let prevPt = null;
+        const steps = 60;
+
+        for (let i = 0; i <= steps; i++) {
+          const az = ((spanStartDeg + (spanEndDeg - spanStartDeg) * (i / steps)) * Math.PI) / 180;
+          const pWorld = norm(
+            add(
+              scale(poleDir, cosR),
+              add(scale(u, sinR * Math.cos(az)), scale(v, sinR * Math.sin(az)))
+            )
+          );
+          const pt = projectWorldToScreen(pWorld, m, sw, sh);
+          if (!pt) {
+            penDown = false;
+            prevPt = null;
+            continue;
+          }
+          if (prevPt && Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y) > sw * 0.4) {
+            penDown = false;
+          }
+          if (!penDown) {
+            ctx.moveTo(pt.x, pt.y);
+            penDown = true;
+          } else {
+            ctx.lineTo(pt.x, pt.y);
+          }
+          prevPt = pt;
+        }
+        ctx.stroke();
+      }
+    }
+
+    function renderLoop() {
+      const sw = window.innerWidth;
+      const sh = window.innerHeight;
+
+      if (video.readyState >= 2) {
+        const vw = video.videoWidth || sw;
+        const vh = video.videoHeight || sh;
+        const scaleRatio = Math.max(sw / vw, sh / vh);
+        const dw = vw * scaleRatio;
+        const dh = vh * scaleRatio;
+        ctx.drawImage(video, (sw - dw) / 2, (sh - dh) / 2, dw, dh);
+      } else {
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, sw, sh);
+      }
+
+      if (isLocked && sunWorld) {
+        const m = getDeviceToWorldMatrix(smoothAlpha, smoothBeta, smoothGamma);
+
+        const sunPt = projectWorldToScreen(sunWorld, m, sw, sh);
+        if (sunPt) {
+          ctx.beginPath();
+          ctx.arc(sunPt.x, sunPt.y, 10, 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(255, 250, 210, 0.75)";
+          ctx.fill();
+        }
+
+        drawSphericalArc(sunWorld, 22.0, 0, 360, 120, "rgba(255, 255, 255, 0.78)", 5, m, sw, sh);
+
+        const antiSolar = { x: -sunWorld.x, y: -sunWorld.y, z: -sunWorld.z };
+        drawRainbowBand(antiSolar, 41.2, -0.32, 0, 360, 140, 2.8, m, sw, sh);
+
+        const sunAzRad = Math.atan2(sunWorld.y, sunWorld.x);
+        const sunAltDeg = (Math.asin(Math.max(-1, Math.min(1, sunWorld.z))) * 180) / Math.PI;
+
+        const zenith = { x: 0, y: 0, z: 1 };
+        const czaRadius = Math.max(8, Math.min(34, 46 - Math.max(0, sunAltDeg)));
+        drawZenithOrientedArc(zenith, sunAzRad, czaRadius, -55, 55, 0.35, true, m, sw, sh);
+
+        const nadir = { x: 0, y: 0, z: -1 };
+        const chaRadius = Math.max(15, Math.min(65, 90 - Math.max(10, sunAltDeg - 46)));
+        drawZenithOrientedArc(nadir, sunAzRad, chaRadius, -50, 50, 0.35, false, m, sw, sh);
+      }
+
+      requestAnimationFrame(renderLoop);
+    }
+  </script>
+</body>
+</html>
