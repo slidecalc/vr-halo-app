@@ -11,6 +11,7 @@
       padding: 0;
       -webkit-tap-highlight-color: transparent;
       user-select: none;
+      touch-action: manipulation;
     }
     html, body {
       width: 100%;
@@ -31,14 +32,14 @@
       position: fixed;
       inset: 0;
       z-index: 20;
-      background: rgba(10, 12, 18, 0.92);
+      background: rgba(10, 12, 18, 0.94);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
       padding: 24px;
       text-align: center;
-      gap: 20px;
+      gap: 18px;
     }
     #startScreen h1 {
       font-size: 20px;
@@ -48,7 +49,7 @@
       font-size: 14px;
       color: #cbd5e1;
       line-height: 1.6;
-      max-width: 300px;
+      max-width: 320px;
     }
     #startBtn {
       background: #2563eb;
@@ -61,8 +62,19 @@
       cursor: pointer;
       box-shadow: 0 8px 24px rgba(37, 99, 235, 0.45);
     }
+    #startBtn:disabled {
+      opacity: 0.6;
+    }
     #startBtn:active {
       transform: scale(0.97);
+    }
+    #statusMsg {
+      font-size: 12px;
+      color: #fbbf24;
+      max-width: 320px;
+      min-height: 18px;
+      line-height: 1.5;
+      word-break: break-word;
     }
     #setLightBtn {
       position: fixed;
@@ -146,11 +158,12 @@
   <div id="startScreen">
     <h1>大気光学現象 AR</h1>
     <p>カメラとモーションセンサーを許可し、画面中央に光源を合わせて「光源設定」を押してください。</p>
-    <button id="startBtn">カメラとセンサーを起動</button>
+    <button id="startBtn" type="button">カメラとセンサーを起動</button>
+    <div id="statusMsg"></div>
   </div>
 
-  <button id="setLightBtn">光源設定</button>
-  <button id="resetBtn">再設定</button>
+  <button id="setLightBtn" type="button">光源設定</button>
+  <button id="resetBtn" type="button">再設定</button>
 
   <video id="hiddenVideo" playsinline autoplay muted style="display:none;"></video>
   <canvas id="procCanvas" width="120" height="120" style="display:none;"></canvas>
@@ -164,19 +177,25 @@
 
     const startScreen = document.getElementById("startScreen");
     const startBtn = document.getElementById("startBtn");
+    const statusMsg = document.getElementById("statusMsg");
     const setLightBtn = document.getElementById("setLightBtn");
     const resetBtn = document.getElementById("resetBtn");
     const reticle = document.getElementById("reticle");
 
     let isLocked = false;
     let sunWorld = null;
+    let sensorsStarted = false;
+    let loopStarted = false;
 
     let hasOrientation = false;
     let smoothAlpha = 0, smoothBeta = 90, smoothGamma = 0;
     let smoothGrav = { x: 0, y: -9.8, z: 0 };
 
-    // iPhone SE3 背面広角カメラの垂直画角目安
     const V_FOV_DEG = 63.0;
+
+    function setStatus(msg) {
+      statusMsg.textContent = msg || "";
+    }
 
     function resize() {
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -210,7 +229,6 @@
 
     function lerpAngle(curr, target, factor) {
       let diff = ((target - curr + 540) % 360) - 180;
-      // 急激なスパイクノイズを少し抑えつつ追従性を確保
       if (Math.abs(diff) > 45) diff *= 0.5;
       return (curr + diff * factor + 360) % 360;
     }
@@ -261,6 +279,9 @@
     }
 
     function initSensors() {
+      if (sensorsStarted) return;
+      sensorsStarted = true;
+
       window.addEventListener("deviceorientation", (e) => {
         if (e.alpha === null || e.beta === null || e.gamma === null) return;
         const a = (typeof e.webkitCompassHeading === "number")
@@ -272,7 +293,6 @@
           smoothGamma = e.gamma;
           hasOrientation = true;
         } else {
-          // 動かしたときのズレを減らすため追従係数を 0.28 に引き上げ
           smoothAlpha = lerpAngle(smoothAlpha, a, 0.28);
           smoothBeta += (e.beta - smoothBeta) * 0.28;
           smoothGamma += (e.gamma - smoothGamma) * 0.28;
@@ -288,48 +308,67 @@
       });
     }
 
-    startBtn.addEventListener("click", async () => {
-      try {
-        if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
-          const res = await DeviceOrientationEvent.requestPermission();
-          if (res !== "granted") {
-            alert("モーションと向きのアクセスを許可してください。");
-            return;
-          }
+    async function requestSensorPermissions() {
+      if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+        const res = await DeviceOrientationEvent.requestPermission();
+        if (res !== "granted") {
+          throw new Error("モーションと向きのアクセスが許可されませんでした（状態: " + res + "）。新しいタブで開き直すかSafari設定を確認してください。");
         }
-        if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
-          await DeviceMotionEvent.requestPermission().catch(() => {});
+      }
+      if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+        await DeviceMotionEvent.requestPermission().catch(() => {});
+      }
+      initSensors();
+    }
+
+    async function startCameraStream() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("この環境ではカメラAPIが使えません。HTTPSで開いているか確認してください。");
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
         }
+      }).catch(() => navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: "environment" }
+      }));
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: { exact: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 }
-          }
-        }).catch(() => navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: { facingMode: "environment" }
-        }));
-
-        const track = stream.getVideoTracks()[0];
-        const caps = track.getCapabilities ? track.getCapabilities() : {};
+      const track = stream.getVideoTracks()[0];
+      if (track && typeof track.getCapabilities === "function") {
+        const caps = track.getCapabilities();
         if (caps.zoom && typeof caps.zoom.min === "number") {
           await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] }).catch(() => {});
         }
+      }
 
-        video.srcObject = stream;
-        await video.play();
+      video.srcObject = stream;
+      await video.play().catch(() => {});
+    }
 
-        initSensors();
+    startBtn.addEventListener("click", async () => {
+      startBtn.disabled = true;
+      setStatus("センサーとカメラを確認中...");
+      try {
+        await requestSensorPermissions();
+        setStatus("カメラを起動中...");
+        await startCameraStream();
 
+        setStatus("");
         startScreen.style.display = "none";
         setLightBtn.style.display = "block";
         reticle.style.display = "block";
-        requestAnimationFrame(renderLoop);
+        if (!loopStarted) {
+          loopStarted = true;
+          requestAnimationFrame(renderLoop);
+        }
       } catch (err) {
-        alert("カメラまたはセンサーの起動に失敗しました。SafariでHTTPSページを開いているか確認してください。\n" + err.message);
+        setStatus("起動できませんでした: " + (err && err.message ? err.message : String(err)));
+        startBtn.disabled = false;
       }
     });
 
