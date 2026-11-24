@@ -168,16 +168,14 @@
     const resetBtn = document.getElementById("resetBtn");
     const reticle = document.getElementById("reticle");
 
-    // 状態変数
     let isLocked = false;
-    let sunWorld = null; // ワールド座標系(X:東/右基準, Y:北/前基準, Z:天頂上向き)での太陽単位ベクトル
+    let sunWorld = null;
 
-    // センサー平滑化用状態
     let hasOrientation = false;
     let smoothAlpha = 0, smoothBeta = 90, smoothGamma = 0;
-    let smoothGrav = { x: 0, y: -1, z: 0 };
+    let smoothGrav = { x: 0, y: -9.8, z: 0 };
 
-    // iPhone SE3 背面広角カメラの垂直画角の目安（約63度）
+    // iPhone SE3 背面広角カメラの垂直画角目安
     const V_FOV_DEG = 63.0;
 
     function resize() {
@@ -189,7 +187,6 @@
     window.addEventListener("resize", resize);
     resize();
 
-    // ベクトル演算ユーティリティ
     function norm(v) {
       const l = Math.hypot(v.x, v.y, v.z) || 1;
       return { x: v.x / l, y: v.y / l, z: v.z / l };
@@ -211,13 +208,13 @@
       return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
     }
 
-    // 角度の最短差分補間（度）
     function lerpAngle(curr, target, factor) {
       let diff = ((target - curr + 540) % 360) - 180;
+      // 急激なスパイクノイズを少し抑えつつ追従性を確保
+      if (Math.abs(diff) > 45) diff *= 0.5;
       return (curr + diff * factor + 360) % 360;
     }
 
-    // デバイス座標系からワールド座標系への回転行列（Z-X'-Y'' 準拠）
     function getDeviceToWorldMatrix(alphaDeg, betaDeg, gammaDeg) {
       const deg2rad = Math.PI / 180;
       const a = alphaDeg * deg2rad;
@@ -228,7 +225,6 @@
       const cB = Math.cos(b), sB = Math.sin(b);
       const cG = Math.cos(g), sG = Math.sin(g);
 
-      // Device axes in World (East=X, North=Y, Up=Z)
       const r11 = cA * cG - sA * sB * sG;
       const r12 = -cB * sA;
       const r13 = cA * sG + cG * sA * sB;
@@ -257,7 +253,6 @@
     }
 
     function worldToDevice(v, m) {
-      // 直交行列の転置
       return {
         x: m[0][0] * v.x + m[1][0] * v.y + m[2][0] * v.z,
         y: m[0][1] * v.x + m[1][1] * v.y + m[2][1] * v.z,
@@ -265,7 +260,6 @@
       };
     }
 
-    // センサーリスナー登録
     function initSensors() {
       window.addEventListener("deviceorientation", (e) => {
         if (e.alpha === null || e.beta === null || e.gamma === null) return;
@@ -278,23 +272,22 @@
           smoothGamma = e.gamma;
           hasOrientation = true;
         } else {
-          // 強いローパスフィルタでノイズ・チラつきを抑制
-          smoothAlpha = lerpAngle(smoothAlpha, a, 0.14);
-          smoothBeta += (e.beta - smoothBeta) * 0.14;
-          smoothGamma += (e.gamma - smoothGamma) * 0.14;
+          // 動かしたときのズレを減らすため追従係数を 0.28 に引き上げ
+          smoothAlpha = lerpAngle(smoothAlpha, a, 0.28);
+          smoothBeta += (e.beta - smoothBeta) * 0.28;
+          smoothGamma += (e.gamma - smoothGamma) * 0.28;
         }
       });
 
       window.addEventListener("devicemotion", (e) => {
         const g = e.accelerationIncludingGravity;
         if (!g || g.x === null) return;
-        smoothGrav.x += (g.x - smoothGrav.x) * 0.15;
-        smoothGrav.y += (g.y - smoothGrav.y) * 0.15;
-        smoothGrav.z += (g.z - smoothGrav.z) * 0.15;
+        smoothGrav.x += (g.x - smoothGrav.x) * 0.25;
+        smoothGrav.y += (g.y - smoothGrav.y) * 0.25;
+        smoothGrav.z += (g.z - smoothGrav.z) * 0.25;
       });
     }
 
-    // カメラ・センサー起動ボタン
     startBtn.addEventListener("click", async () => {
       try {
         if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
@@ -340,14 +333,12 @@
       }
     });
 
-    // 画面中央付近の最も明るい1個の光源重心を検出（カメラ空間ベクトルで返す）
     function detectBrightestLightRay() {
       const w = procCanvas.width;
       const h = procCanvas.height;
       procCtx.drawImage(video, 0, 0, w, h);
       const data = procCtx.getImageData(0, 0, w, h).data;
 
-      // 中央40%領域を探索
       const xMin = Math.floor(w * 0.3);
       const xMax = Math.floor(w * 0.7);
       const yMin = Math.floor(h * 0.3);
@@ -362,7 +353,6 @@
         }
       }
 
-      // 最大輝度の90%以上のピクセルだけで重心を計算（1個の光源に絞る）
       const threshold = Math.max(maxLum * 0.9, 180);
       let sumX = 0, sumY = 0, sumW = 0;
 
@@ -382,240 +372,7 @@
       const cx = sumW > 0 ? sumX / sumW : w / 2;
       const cy = sumW > 0 ? sumY / sumW : h / 2;
 
-      // 画像座標 -> カメラ視線ベクトル（デバイス座標系: 右+X, 上+Y, 背面カメラ前方-Z）
       const vFovRad = (V_FOV_DEG * Math.PI) / 180;
       const f = (h / 2) / Math.tan(vFovRad / 2);
       const dx = (cx - w / 2) / f;
-      const dy = -(cy - h / 2) / f;
-      return norm({ x: dx, y: dy, z: -1 });
-    }
-
-    // 光源設定ボタン押下
-    setLightBtn.addEventListener("click", () => {
-      const rayDevice = detectBrightestLightRay();
-      const m = getDeviceToWorldMatrix(smoothAlpha, smoothBeta, smoothGamma);
-      let sun = norm(deviceToWorld(rayDevice, m));
-
-      // 加速度センサーから天頂方向（重力反対方向）を補正し、太陽高度の安定性を高める
-      const gravLen = Math.hypot(smoothGrav.x, smoothGrav.y, smoothGrav.z);
-      if (gravLen > 1.0) {
-        const upDevice = norm({ x: -smoothGrav.x, y: -smoothGrav.y, z: -smoothGrav.z });
-        const sinAlt = Math.max(-1, Math.min(1, dot(rayDevice, upDevice)));
-        const horiz = norm({ x: sun.x, y: sun.y, z: 0 });
-        const cosAlt = Math.sqrt(Math.max(0, 1 - sinAlt * sinAlt));
-        sun = norm({
-          x: horiz.x * cosAlt,
-          y: horiz.y * cosAlt,
-          z: sinAlt
-        });
-      }
-
-      sunWorld = sun;
-      isLocked = true;
-      setLightBtn.style.display = "none";
-      reticle.style.display = "none";
-      resetBtn.style.display = "block";
-    });
-
-    resetBtn.addEventListener("click", () => {
-      isLocked = false;
-      sunWorld = null;
-      setLightBtn.style.display = "block";
-      reticle.style.display = "block";
-      resetBtn.style.display = "none";
-    });
-
-    // ワールド単位ベクトルを画面2D座標へ投影（カメラ後方ならnull）
-    function projectWorldToScreen(dirWorld, m, sw, sh) {
-      const d = worldToDevice(dirWorld, m);
-      // 背面カメラは -Z 方向を向いているため d.z < -0.15 のみ前面として描画
-      if (d.z >= -0.15) return null;
-
-      const vFovRad = (V_FOV_DEG * Math.PI) / 180;
-      const f = (sh / 2) / Math.tan(vFovRad / 2);
-      const sx = sw / 2 + (d.x / -d.z) * f;
-      const sy = sh / 2 - (d.y / -d.z) * f;
-
-      // 画面から極端に離れすぎた座標は破綻防止のため除外
-      if (Math.abs(sx - sw / 2) > sw * 3 || Math.abs(sy - sh / 2) > sh * 3) return null;
-      return { x: sx, y: sy };
-    }
-
-    // 3D空間上の任意の軸・半径角のリング/アークを描画
-    function drawSphericalArc(centerDir, radiusDeg, startAzDeg, endAzDeg, steps, color, lineWidth, m, sw, sh) {
-      const rRad = (radiusDeg * Math.PI) / 180;
-      const sinR = Math.sin(rRad);
-      const cosR = Math.cos(rRad);
-
-      // centerDir に直交する2つの基底ベクトル u, v を構築
-      const ref = Math.abs(centerDir.z) < 0.9 ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 };
-      const u = norm(cross(ref, centerDir));
-      const v = norm(cross(centerDir, u));
-
-      ctx.beginPath();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = lineWidth;
-      ctx.lineCap = "round";
-
-      let penDown = false;
-      let prevPt = null;
-
-      for (let i = 0; i <= steps; i++) {
-        const t = i / steps;
-        const az = ((startAzDeg + (endAzDeg - startAzDeg) * t) * Math.PI) / 180;
-        const pWorld = norm(
-          add(
-            scale(centerDir, cosR),
-            add(scale(u, sinR * Math.cos(az)), scale(v, sinR * Math.sin(az)))
-          )
-        );
-
-        const pt = projectWorldToScreen(pWorld, m, sw, sh);
-        if (!pt) {
-          penDown = false;
-          prevPt = null;
-          continue;
-        }
-
-        // 隣接点との距離が異常に飛んだ場合は線を切る（チラつき防止）
-        if (prevPt && Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y) > sw * 0.4) {
-          penDown = false;
-        }
-
-        if (!penDown) {
-          ctx.moveTo(pt.x, pt.y);
-          penDown = true;
-        } else {
-          ctx.lineTo(pt.x, pt.y);
-        }
-        prevPt = pt;
-      }
-      ctx.stroke();
-    }
-
-    // 七色スペクトル描画ヘルパー
-    const RAINBOW_COLORS = [
-      "rgba(255, 50, 50, 0.72)",   // 赤
-      "rgba(255, 150, 30, 0.72)",  // 橙
-      "rgba(255, 235, 50, 0.72)",  // 黄
-      "rgba(60, 220, 90, 0.72)",   // 緑
-      "rgba(50, 190, 255, 0.72)",  // 水
-      "rgba(60, 90, 255, 0.72)",   // 青
-      "rgba(170, 70, 255, 0.72)"   // 紫
-    ];
-
-    function drawRainbowBand(centerDir, baseRadiusDeg, stepDeg, startAz, endAz, steps, width, m, sw, sh) {
-      for (let i = 0; i < RAINBOW_COLORS.length; i++) {
-        const r = baseRadiusDeg + (i - 3) * stepDeg;
-        drawSphericalArc(centerDir, r, startAz, endAz, steps, RAINBOW_COLORS[i], width, m, sw, sh);
-      }
-    }
-
-    function renderLoop() {
-      const sw = window.innerWidth;
-      const sh = window.innerHeight;
-
-      // カメラ映像をアスペクト比維持（cover）でキャンバスに描画
-      if (video.readyState >= 2) {
-        const vw = video.videoWidth || sw;
-        const vh = video.videoHeight || sh;
-        const scaleRatio = Math.max(sw / vw, sh / vh);
-        const dw = vw * scaleRatio;
-        const dh = vh * scaleRatio;
-        ctx.drawImage(video, (sw - dw) / 2, (sh - dh) / 2, dw, dh);
-      } else {
-        ctx.fillStyle = "#000";
-        ctx.fillRect(0, 0, sw, sh);
-      }
-
-      if (isLocked && sunWorld) {
-        const m = getDeviceToWorldMatrix(smoothAlpha, smoothBeta, smoothGamma);
-
-        // 1. 太陽位置マーカー（淡い光点）
-        const sunPt = projectWorldToScreen(sunWorld, m, sw, sh);
-        if (sunPt) {
-          ctx.beginPath();
-          ctx.arc(sunPt.x, sunPt.y, 10, 0, Math.PI * 2);
-          ctx.fillStyle = "rgba(255, 250, 210, 0.75)";
-          ctx.fill();
-        }
-
-        // 2. 22°ハロ（太陽から22°の白いリング）
-        drawSphericalArc(sunWorld, 22.0, 0, 360, 120, "rgba(255, 255, 255, 0.78)", 5, m, sw, sh);
-
-        // 3. 虹（太陽の正反対＝対日点から42°の七色リング、外側が赤・内側が紫）
-        const antiSolar = { x: -sunWorld.x, y: -sunWorld.y, z: -sunWorld.z };
-        drawRainbowBand(antiSolar, 41.2, -0.32, 0, 360, 140, 2.8, m, sw, sh);
-
-        // 太陽方位角（水平面投影）
-        const sunAzRad = Math.atan2(sunWorld.y, sunWorld.x);
-        const sunAltDeg = (Math.asin(Math.max(-1, Math.min(1, sunWorld.z))) * 180) / Math.PI;
-
-        // 4. 環天頂アーク（天頂 {0,0,1} を中心とし、太陽上空約46°を通る七色アーク）
-        const zenith = { x: 0, y: 0, z: 1 };
-        const czaRadius = Math.max(8, Math.min(34, 46 - Math.max(0, sunAltDeg)));
-        // 太陽方向の真上を中心に左右約55°の範囲を描画（外側＝下側が赤）
-        // zenith基準での方位角を計算するため基準軸を合わせる
-        drawZenithOrientedArc(zenith, sunAzRad, czaRadius, -55, 55, 0.35, true, m, sw, sh);
-
-        // 5. 環水平アーク（天底 {0,0,-1} を中心＝地平線と平行な七色アーク、太陽の下約46°）
-        const nadir = { x: 0, y: 0, z: -1 };
-        const chaRadius = Math.max(15, Math.min(65, 90 - Math.max(10, sunAltDeg - 46)));
-        drawZenithOrientedArc(nadir, sunAzRad, chaRadius, -50, 50, 0.35, false, m, sw, sh);
-      }
-
-      requestAnimationFrame(renderLoop);
-    }
-
-    // 太陽方位に合わせた天頂・天底基準の七色アーク描画
-    function drawZenithOrientedArc(poleDir, sunAzRad, baseRadiusDeg, spanStartDeg, spanEndDeg, stepDeg, redOutside, m, sw, sh) {
-      // poleDir に直交し、sunAzRad 方向を 0° とする基底を構築
-      const u = norm({ x: Math.cos(sunAzRad), y: Math.sin(sunAzRad), z: 0 });
-      const v = norm(cross(poleDir, u));
-
-      for (let c = 0; c < RAINBOW_COLORS.length; c++) {
-        const offset = redOutside ? (3 - c) * stepDeg : (c - 3) * stepDeg;
-        const rRad = ((baseRadiusDeg + offset) * Math.PI) / 180;
-        const sinR = Math.sin(rRad);
-        const cosR = Math.cos(rRad);
-
-        ctx.beginPath();
-        ctx.strokeStyle = RAINBOW_COLORS[c];
-        ctx.lineWidth = 2.6;
-        ctx.lineCap = "round";
-
-        let penDown = false;
-        let prevPt = null;
-        const steps = 60;
-
-        for (let i = 0; i <= steps; i++) {
-          const az = ((spanStartDeg + (spanEndDeg - spanStartDeg) * (i / steps)) * Math.PI) / 180;
-          const pWorld = norm(
-            add(
-              scale(poleDir, cosR),
-              add(scale(u, sinR * Math.cos(az)), scale(v, sinR * Math.sin(az)))
-            )
-          );
-          const pt = projectWorldToScreen(pWorld, m, sw, sh);
-          if (!pt) {
-            penDown = false;
-            prevPt = null;
-            continue;
-          }
-          if (prevPt && Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y) > sw * 0.4) {
-            penDown = false;
-          }
-          if (!penDown) {
-            ctx.moveTo(pt.x, pt.y);
-            penDown = true;
-          } else {
-            ctx.lineTo(pt.x, pt.y);
-          }
-          prevPt = pt;
-        }
-        ctx.stroke();
-      }
-    }
-  </script>
-</body>
-</html>
+      const dy = -(cy - h /
